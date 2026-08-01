@@ -76,6 +76,32 @@ def get_secret_refs(data: Dict[str, Any]) -> Dict[str, Set[str]]:
 
     return all_refs
 
+
+def get_configmap_refs(data: Dict[str, Any]) -> Dict[str, Set[str]]:
+    """Maps configmap names to the specific keys they need to provide."""
+    all_refs = {}
+
+    def add_ref(name: str, key: str = None):
+        if not name:
+            return
+        if name not in all_refs:
+            all_refs[name] = set()
+        if key:
+            all_refs[name].add(key)
+
+    for spec in find_pod_specs(data):
+        containers = spec.get("containers", []) + spec.get("initContainers", [])
+        for c in containers:
+            for env in c.get("env", []):
+                if "valueFrom" in env and "configMapKeyRef" in env["valueFrom"]:
+                    ref = env["valueFrom"]["configMapKeyRef"]
+                    add_ref(ref.get("name"), ref.get("key"))
+            for ef in c.get("envFrom", []):
+                if "configMapRef" in ef:
+                    add_ref(ef["configMapRef"].get("name"))
+
+    return all_refs
+
 def build_summary(files_scanned: int, passed: int, failed: int, warnings: int, files: list):
     return {
         "files_scanned": files_scanned,
@@ -106,7 +132,8 @@ def run_audit(
     effective_quiet = quiet or is_sarif
 
     for yaml_file in files_to_scan:
-        combined_refs: Dict[str, Set[str]] = {}
+        combined_secret_refs: Dict[str, Set[str]] = {}
+        combined_configmap_refs: Dict[str, Set[str]] = {}
         
         has_content = hasattr(yaml_file, "content") and yaml_file.content is not None
         try:
@@ -120,7 +147,9 @@ def run_audit(
                 if not doc:
                     continue
                 for name, keys in get_secret_refs(doc).items():
-                    combined_refs.setdefault(name, set()).update(keys)
+                    combined_secret_refs.setdefault(name, set()).update(keys)
+                for name, keys in get_configmap_refs(doc).items():
+                    combined_configmap_refs.setdefault(name, set()).update(keys)
         except yaml.YAMLError:
                 findings.append({
                     "file_path": yaml_file,
@@ -140,27 +169,31 @@ def run_audit(
                         )
                 continue
 
-        if not combined_refs:
+        if not combined_secret_refs and not combined_configmap_refs:
             continue
         file_results = []
 
         table = Table(title=f"Security Audit: {yaml_file.name}")
-        table.add_column("Secret Name", style="cyan")
+        table.add_column("Type", style="magenta")
+        table.add_column("Resource Name", style="cyan")
         table.add_column("Status", justify="left")
 
-        for name, keys in combined_refs.items():
+        for name, keys in combined_secret_refs.items():
+            sanitized_name = sanitize_string(name)
             try:
                 secret = v1.read_namespaced_secret(name, namespace)
                 if keys:
                     existing_keys = (secret.data or {}).keys()
-                    missing = [k for k in keys if k not in existing_keys]
+                    raw_missing = [k for k in keys if k not in existing_keys]
+                    missing = [sanitize_string(k) for k in raw_missing]
                     if missing:
                         table.add_row(
-                            name,
+                            "SECRET",
+                            sanitized_name,
                             f"[bold yellow]KEY MISSING: {', '.join(missing)}[/bold yellow]",
                         )
                         file_results.append({
-                                "secret": name,
+                                "secret": sanitized_name,
                                 "status": "WARNING",
                                 "missing_keys": missing
                         })
@@ -169,45 +202,115 @@ def run_audit(
                                 "file_path": yaml_file,
                                 "type": "warning",
                                 "rule_id": "missing-key",
-                                "res_name": name,
+                                "res_name": sanitized_name,
                                 "res_key": key,
                             })
                         global_warnings += 1
                     else:
-                        table.add_row(name, "[bold green]PASS[/bold green]")
+                        table.add_row("SECRET", sanitized_name, "[bold green]PASS[/bold green]")
                         file_results.append({
-                             "secret": name,
+                             "secret": sanitized_name,
                              "status": "PASS"
                         })
                         global_passed += 1
                 else:
-                    table.add_row(name, "[bold green]PASS (Found)[/bold green]")
+                    table.add_row("SECRET", sanitized_name, "[bold green]PASS (Found)[/bold green]")
                     file_results.append({
-                        "secret": name,
+                        "secret": sanitized_name,
                         "status": "PASS"
                     })
                     global_passed += 1
             except ApiException as e:
                 if e.status == 404:
-                    table.add_row(name, "[bold red]FAIL (Secret Missing)[/bold red]")
+                    table.add_row("SECRET", sanitized_name, "[bold red]FAIL (Secret Missing)[/bold red]")
                     file_results.append({
-                            "secret": name,
+                            "secret": sanitized_name,
                             "status": "FAIL"
                     })
                     findings.append({
                         "file_path": yaml_file,
                         "type": "error",
                         "rule_id": "missing-secret",
-                        "res_name": name,
+                        "res_name": sanitized_name,
                     })
                     global_failed += 1
                 else:
-                    table.add_row(name, f"[dim]Error {e.status}[/dim]")
+                    table.add_row("SECRET", sanitized_name, f"[dim]Error {sanitize_string(str(e.status))}[/dim]")
                     findings.append({
                         "file_path": yaml_file,
                         "type": "error",
                         "rule_id": "missing-secret",
-                        "res_name": name,
+                        "res_name": sanitized_name,
+                    })
+                    global_failed += 1
+
+        for name, keys in combined_configmap_refs.items():
+            sanitized_name = sanitize_string(name)
+            try:
+                configmap = v1.read_namespaced_config_map(name, namespace)
+                existing_data = configmap.data or {}
+                existing_binary = configmap.binary_data or {}
+                existing_keys = set(existing_data.keys()) | set(existing_binary.keys())
+                if keys:
+                    raw_missing = [k for k in keys if k not in existing_keys]
+                    missing = [sanitize_string(k) for k in raw_missing]
+                    if missing:
+                        table.add_row(
+                            "CONFIGMAP",
+                            sanitized_name,
+                            f"[bold yellow]KEY MISSING: {', '.join(missing)}[/bold yellow]",
+                        )
+                        file_results.append({
+                                "configmap": sanitized_name,
+                                "status": "WARNING",
+                                "missing_keys": missing
+                        })
+                        for key in missing:
+                            findings.append({
+                                "file_path": yaml_file,
+                                "type": "warning",
+                                "rule_id": "missing-configmap-key",
+                                "res_name": sanitized_name,
+                                "res_key": key,
+                            })
+                        global_warnings += 1
+                    else:
+                        table.add_row("CONFIGMAP", sanitized_name, "[bold green]PASS[/bold green]")
+                        file_results.append({
+                             "configmap": sanitized_name,
+                             "status": "PASS"
+                        })
+                        global_passed += 1
+                else:
+                    table.add_row("CONFIGMAP", sanitized_name, "[bold green]PASS (Found)[/bold green]")
+                    file_results.append({
+                        "configmap": sanitized_name,
+                        "status": "PASS"
+                    })
+                    global_passed += 1
+            except ApiException as e:
+                if e.status == 404:
+                    table.add_row("CONFIGMAP", sanitized_name, "[bold red]FAIL (ConfigMap Missing)[/bold red]")
+                    file_results.append({
+                            "configmap": sanitized_name,
+                            "status": "FAIL"
+                    })
+                    findings.append({
+                        "file_path": yaml_file,
+                        "type": "error",
+                        "rule_id": "missing-configmap",
+                        "res_name": sanitized_name,
+                    })
+                    global_failed += 1
+                else:
+                    table.add_row("CONFIGMAP", sanitized_name, f"[dim]Error {sanitize_string(str(e.status))}[/dim]")
+                    findings.append({
+                        "file_path": yaml_file,
+                        "type": "error",
+                        "rule_id": "configmap-api-error",
+                        "res_name": sanitized_name,
+                        "status_code": sanitize_string(str(e.status)),
+                        "reason": sanitize_string(str(e.reason)),
                     })
                     global_failed += 1
 

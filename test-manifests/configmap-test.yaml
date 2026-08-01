@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: configmap-test-pod
+spec:
+  containers:
+  - name: app
+    image: nginx
+    env:
+      - name: VALID_VAR
+        valueFrom:
+          configMapKeyRef:
+            name: valid-cm
+            key: valid-key
+      - name: MISSING_KEY_VAR
+        valueFrom:
+          configMapKeyRef:
+            name: valid-cm
+            key: missing-key
+      - name: MISSING_CM_VAR
+        valueFrom:
+          configMapKeyRef:
+            name: missing-cm
+            key: some-key
+    envFrom:
+      - configMapRef:
+          name: env-cm
+      - configMapRef:
+          name: missing-env-cm
