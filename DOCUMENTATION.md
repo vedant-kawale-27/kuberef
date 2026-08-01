@@ -97,9 +97,50 @@ imagePullSecrets:
 6. **Open source:** Documentation, licensing, and interaction. 
 
 # Future Roadmap:
-1. **Native Integration:** Transitioning the tool into a kubectl plugin.
-2. **Broader Validation:** Extending the recursive engine to support ConfigMaps and PersistentVolumeClaims (PVCs).
-3. **Helm Support:** Implementing template parsing for Helm-based workflows.
+1. **Broader Validation:** Extending the recursive engine to support ConfigMaps and PersistentVolumeClaims (PVCs).
+2. **Helm Support:** Implementing template parsing for Helm-based workflows.
+
+# Kubectl Plugin Integration
+
+Once installed, `kuberef` can be seamlessly invoked as a native `kubectl` plugin subcommand: `kubectl ref`.
+
+## How It Works
+Kubernetes natively supports CLI extensions (plugins) by scanning directories in the system's `$PATH` for any executable prefixed with `kubectl-`. By registering `kubectl-ref` in `pyproject.toml`, our package generates both `kuberef` and `kubectl-ref` executables upon installation, making the tool instantly discoverable by `kubectl`.
+
+## Local Development and Testing Setup
+To test the routing mechanism locally before distributing or installing the package globally:
+
+1. **Install in editable mode** using pip within your virtual environment (or poetry) to generate the development build binaries:
+   ```bash
+   pip install -e .
+   ```
+2. **Locate the binary:**
+   Find the absolute path of the generated `kubectl-ref` executable within your development environment's binary directory (e.g., `.venv/bin/kubectl-ref` on Unix or `.venv/Scripts/kubectl-ref.exe` on Windows).
+3. **Manually Symlink/Copy to Path:**
+   Create a symlink pointing to the dev binary inside a directory that is globally recognized by your system's `$PATH` (e.g., `/usr/local/bin/` on Unix, or any custom PATH directory on Windows):
+   - **Unix (macOS/Linux):**
+     ```bash
+     ln -s /path/to/virtualenv/bin/kubectl-ref /usr/local/bin/kubectl-ref
+     ```
+   - **Windows (PowerShell as Admin):**
+     ```powershell
+     New-Item -ItemType SymbolicLink -Path "C:\path\in\your\PATH\kubectl-ref.exe" -Value "C:\path\to\virtualenv\Scripts\kubectl-ref.exe"
+     ```
+4. **Verify Routing:**
+   Check if `kubectl` discovers the new plugin:
+   ```bash
+   kubectl plugin list
+   ```
+   Run the native Kubernetes subcommand to test routing:
+   ```bash
+   kubectl ref --help
+   ```
+
+## Context and Kubeconfig Forwarding
+When invoked as `kubectl ref`, the master `kubectl` process handles execution but forwards all flags to the plugin script. Native global flags (like `--context` and `--kubeconfig`) are gracefully intercepted and forwarded to the cluster configuration parser:
+```bash
+kubectl ref deployment.yaml --context dev-cluster --kubeconfig ~/.kube/config
+```
 
 # Technical Challenges: 
 1. **Recursive Spec Discovery:** Kubernetes manifests are deeply nested. A Secret might be in a Pod, a Deployment, or a CronJob. Finding every reference without crashing on missing keys was a major logic hurdle.

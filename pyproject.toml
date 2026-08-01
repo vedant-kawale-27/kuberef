@@ -41,6 +41,7 @@ build-backend = "poetry.core.masonry.api"
 
 [project.scripts]
 kuberef = "kuberef.main:start"
+kubectl-ref = "kuberef.main:start"
 [dependency-groups]
 dev = [
     "pytest (>=9.0.2,<10.0.0)"

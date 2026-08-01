@@ -284,6 +284,8 @@ def audit(
     output_format: str = typer.Option("text", "--format", help="Output format: text, github, or sarif"),
     ci: bool = typer.Option(False, "--ci", help="CI mode: alias for --format github"),
     output_file: Path = typer.Option(None, "--output-file", "-o", help="Path to write the report (e.g. results.sarif)"),
+    context: str = typer.Option(None, "--context", help="Kubeconfig context name to use"),
+    kubeconfig: Path = typer.Option(None, "--kubeconfig", help="Path to the kubeconfig file to use"),
 ):
     """
 Deep audit: Checks files or directories against Cluster, Namespace,
@@ -341,9 +343,38 @@ Examples:
         return
 
     try:
-        config.load_kube_config()
-        _, active_context = config.list_kube_config_contexts()
-        cluster_name = active_context["name"]
+        import os
+        resolved_context = context if context else os.environ.get("KUBECTL_PLUGINS_CURRENT_CONTEXT")
+        resolved_kubeconfig = kubeconfig
+
+        is_plugin_or_external = (
+            bool(resolved_kubeconfig)
+            or bool(resolved_context)
+            or "KUBECONFIG" in os.environ
+            or "KUBECTL_PLUGINS_CURRENT_CONTEXT" in os.environ
+        )
+
+        is_incluster = False
+        if is_plugin_or_external:
+            config.load_kube_config(
+                config_file=str(resolved_kubeconfig) if resolved_kubeconfig else None,
+                context=resolved_context
+            )
+        else:
+            try:
+                config.load_kube_config()
+            except Exception:
+                config.load_incluster_config()
+                is_incluster = True
+
+        try:
+            if is_incluster:
+                cluster_name = "in-cluster"
+            else:
+                _, active_context = config.list_kube_config_contexts()
+                cluster_name = active_context["name"] if active_context else "unknown"
+        except Exception:
+            cluster_name = "unknown"
         v1 = client.CoreV1Api()
         v1.read_namespace(name=namespace)
         if not json_output and not quiet and output_format != "sarif":
